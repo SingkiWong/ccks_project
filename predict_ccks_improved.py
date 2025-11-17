@@ -42,25 +42,66 @@ class ImprovedCCKSPredictor:
         except Exception as e:
             print(f"⚠ 加载模型失败: {e}")
             print("使用未训练的模型")
-        
+
         self.model.eval()
+
+    def _extract_by_connectives(self, text: str) -> List[CausalEvent]:
+        """基于因果连接词切分的事件候选"""
+        patterns = [
+            re.compile(r'(?:由于|因为)([^，。；！？]*?)(?:因此|所以|致使|从而|以致|导致|引发|使得)([^，。；！？]*)'),
+            re.compile(r'([^，。；！？]*?)(?:导致|引发|致使|促使|使得|结果)([^，。；！？]+)')
+        ]
+
+        events: List[CausalEvent] = []
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                cause_span = match.group(1).strip()
+                effect_span = match.group(2).strip()
+
+                if len(cause_span) < 2 or len(effect_span) < 2:
+                    continue
+
+                cause_start = text.find(cause_span, match.start())
+                effect_start = text.find(effect_span, match.start())
+
+                cause_event = CausalEvent(
+                    text=cause_span,
+                    start_pos=cause_start,
+                    end_pos=cause_start + len(cause_span),
+                    event_type=self._infer_event_type(cause_span),
+                    arguments={'phrase': cause_span}
+                )
+                effect_event = CausalEvent(
+                    text=effect_span,
+                    start_pos=effect_start,
+                    end_pos=effect_start + len(effect_span),
+                    event_type=self._infer_event_type(effect_span),
+                    arguments={'phrase': effect_span}
+                )
+
+                events.extend([cause_event, effect_event])
+
+        return events
     
     def extract_events_from_text(self, text: str) -> List[CausalEvent]:
         """
         智能事件提取 - 基于训练数据的模式
         """
         events = []
+
+        # 0. 通过因果连接词切分句子，优先捕获明确的因果链
+        events.extend(self._extract_by_connectives(text))
         
         # 1. 基于关键词的精确匹配
         keywords = {
-            '价格': ['价格上涨', '价格下跌', '价格提升', '价格下降', '涨价', '降价'],
-            '供给': ['供给减少', '供给增加', '供应减少', '供应增加', '产量下降', '产量增加'],
-            '需求': ['需求增加', '需求减少', '需求旺盛', '需求疲软'],
-            '成本': ['成本上升', '成本下降', '成本增加', '成本提升'],
-            '利润': ['利润下降', '利润增加', '盈利下降', '盈利增加'],
-            '销量': ['销量增加', '销量减少', '销售增长', '销售下滑'],
+            '价格': ['价格上涨', '价格下跌', '价格提升', '价格下降', '涨价', '降价', '价格回落', '价格上行'],
+            '供给': ['供给减少', '供给增加', '供应减少', '供应增加', '产量下降', '产量增加', '供应紧张', '供应充足'],
+            '需求': ['需求增加', '需求减少', '需求旺盛', '需求疲软', '订单减少', '订单增加'],
+            '成本': ['成本上升', '成本下降', '成本增加', '成本提升', '成本降低'],
+            '利润': ['利润下降', '利润增加', '盈利下降', '盈利增加', '收益下滑', '收益增长'],
+            '销量': ['销量增加', '销量减少', '销售增长', '销售下滑', '销量下滑'],
             '库存': ['库存增加', '库存减少', '库存高企', '库存下降'],
-            '进出口': ['进口增加', '进口减少', '出口增加', '出口下降'],
+            '进出口': ['进口增加', '进口减少', '出口增加', '出口下降', '出口下滑'],
         }
         
         for category, phrases in keywords.items():
@@ -120,6 +161,27 @@ class ImprovedCCKSPredictor:
     
     def _categorize_event(self, phrase: str) -> str:
         """根据短语判断事件类型"""
+        phrase_to_type = {
+            '价格上涨': '市场价格提升', '涨价': '市场价格提升', '价格回落': '市场价格下降',
+            '价格下降': '市场价格下降', '降价': '市场价格下降', '价格上行': '市场价格提升',
+            '供给减少': '供给减少', '供应减少': '供给减少', '供应紧张': '供给减少',
+            '产量下降': '供给减少', '供给增加': '供给增加', '供应增加': '供给增加',
+            '需求增加': '需求增加', '需求旺盛': '需求增加', '订单增加': '需求增加',
+            '需求减少': '需求减少', '需求疲软': '需求减少', '订单减少': '需求减少',
+            '成本上升': '运营成本提升', '成本增加': '运营成本提升', '成本提升': '运营成本提升',
+            '成本下降': '运营成本下降', '成本降低': '运营成本下降',
+            '利润下降': '产品利润下降', '盈利下降': '产品利润下降', '收益下滑': '产品利润下降',
+            '利润增加': '产品利润增加', '盈利增加': '产品利润增加', '收益增长': '产品利润增加',
+            '销量减少': '销量（消费）减少', '销量下滑': '销量（消费）减少', '销售下滑': '销量（消费）减少',
+            '销量增加': '销量（消费）增加', '销售增长': '销量（消费）增加',
+            '库存增加': '库存增加', '库存减少': '库存减少',
+            '进口减少': '进口下降', '出口下降': '出口下降', '出口下滑': '出口下降'
+        }
+
+        for key_phrase, mapped_type in phrase_to_type.items():
+            if key_phrase in phrase:
+                return mapped_type
+
         if '价格' in phrase or '涨' in phrase or '跌' in phrase:
             return '价格变动'
         elif '供给' in phrase or '供应' in phrase or '产量' in phrase:
@@ -154,7 +216,7 @@ class ImprovedCCKSPredictor:
         else:
             return '市场影响'
     
-    def predict_sample(self, sample: Dict, threshold: float = 0.3) -> Dict:
+    def predict_sample(self, sample: Dict, threshold: float = 0.5) -> Dict:
         """预测单个样本"""
         text = sample['text']
         text_id = sample['text_id']
@@ -213,7 +275,18 @@ class ImprovedCCKSPredictor:
         """映射到CCKS事件类型"""
         text = event.text
         phrase = event.arguments.get('phrase', '')
-        
+
+        phrase_to_ccks = {
+            '供应紧张': '供给减少', '供应充足': '供给增加', '价格回落': '市场价格下降',
+            '价格上行': '市场价格提升', '收益下滑': '产品利润下降', '收益增长': '产品利润增加',
+            '销量下滑': '销量（消费）减少', '订单减少': '需求减少', '订单增加': '需求增加',
+            '出口下滑': '出口下降'
+        }
+
+        for key, mapped in phrase_to_ccks.items():
+            if key in phrase or key in text:
+                return mapped
+
         # 基于关键词判断
         if '供给' in text or '供应' in text or '产量' in text:
             if any(w in text for w in ['减少', '下降', '不足']):
@@ -260,7 +333,7 @@ class ImprovedCCKSPredictor:
         else:
             return '负向影响'  # 默认
     
-    def predict_file(self, input_path: str, output_path: str, threshold: float = 0.3):
+    def predict_file(self, input_path: str, output_path: str, threshold: float = 0.5):
         """预测整个文件"""
         print(f"\n预测文件: {input_path}")
         print(f"输出到: {output_path}")
@@ -307,7 +380,7 @@ def main():
     parser.add_argument('--input', default='ccks_task2_eval_data.txt')
     parser.add_argument('--output', default='predictions.txt')
     parser.add_argument('--model', default='checkpoints/best_model.pt')
-    parser.add_argument('--threshold', type=float, default=0.3)
+    parser.add_argument('--threshold', type=float, default=0.5)
     
     args = parser.parse_args()
     
