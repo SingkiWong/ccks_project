@@ -591,9 +591,13 @@ class CausalExtractionModel(nn.Module):
     
     def __init__(self, bert_model_name: str = 'bert-base-chinese',
                  hidden_dim: int = 768, num_gnn_layers: int = 3,
-                 num_heads: int = 4):
+                 num_heads: int = 4,
+                 device: torch.device | None = None):
         super(CausalExtractionModel, self).__init__()
-        
+
+        # 设备
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         # BERT编码器
         self.bert = BertModel.from_pretrained(bert_model_name)
         self.tokenizer = BertTokenizer.from_pretrained(bert_model_name)
@@ -619,6 +623,9 @@ class CausalExtractionModel(nn.Module):
             hidden_dim=hidden_dim,
             num_classes=3  # 原因、结果、无关系
         )
+
+        # 将整个模型移至目标设备
+        self.to(self.device)
         
     def encode_events(self, text: str, events: List[CausalEvent]) -> torch.Tensor:
         """
@@ -640,9 +647,9 @@ class CausalExtractionModel(nn.Module):
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
-                max_length=128
-            )
-            
+                max_length=150
+            ).to(self.device)
+
             with torch.no_grad():
                 outputs = self.bert(**tokens)
                 # 使用[CLS] token的表示
@@ -688,11 +695,14 @@ class CausalExtractionModel(nn.Module):
         
         if len(edge_list) == 0:
             # 如果没有边,返回空tensor
-            return torch.empty((2, 0), dtype=torch.long), torch.empty((0, 11))
-        
-        edge_index = torch.tensor(edge_list, dtype=torch.long).t()
-        edge_features = torch.stack(edge_features)
-        
+            return (
+                torch.empty((2, 0), dtype=torch.long, device=self.device),
+                torch.empty((0, 11), device=self.device)
+            )
+
+        edge_index = torch.tensor(edge_list, dtype=torch.long, device=self.device).t()
+        edge_features = torch.stack(edge_features).to(self.device)
+
         return edge_index, edge_features
     
     def forward(self, text: str, events: List[CausalEvent],
@@ -816,6 +826,9 @@ def train_step(model: CausalExtractionModel, text: str,
     # 前向传播
     outputs = model(text, events, event_pairs)
     logits = outputs['logits']
+
+    # 移动标签到模型设备
+    labels = labels.to(model.device)
     
     # 计算focal loss
     loss = model.classifier.compute_focal_loss(logits, labels, alpha, gamma)

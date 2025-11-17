@@ -26,15 +26,17 @@ class ImprovedCCKSPredictor:
         '负向影响', '正向影响', '进口下降', '出口下降'
     }
     
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, device: str | None = None):
         print("加载模型...")
+        resolved_device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
         self.model = CausalExtractionModel(
             bert_model_name='bert-base-chinese',
             hidden_dim=768,
             num_gnn_layers=3,
-            num_heads=4
+            num_heads=4,
+            device=resolved_device
         )
-        
+
         try:
             checkpoint = torch.load(model_path, map_location='cpu')
             self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -43,6 +45,7 @@ class ImprovedCCKSPredictor:
             print(f"⚠ 加载模型失败: {e}")
             print("使用未训练的模型")
 
+        print(f"推理设备: {resolved_device}")
         self.model.eval()
 
     def _extract_by_connectives(self, text: str) -> List[CausalEvent]:
