@@ -74,6 +74,13 @@ python train.py
 - **模型与超参**: 统一采用 `BERT-base` 文本编码器，AdamW 优化器，学习率 `3e-5`，批量大小 `8`，最大序列长度 `150`，训练轮数 `20`，因果/角色阈值 `τ_c=τ_r=0.5`。短文本使用填充保持长度一致。
 - **GPU 支持**: 训练与推理会自动检测 `cuda`，若可用将把 BERT、GNN 与分类器完整迁移到 GPU。
 
+### 评估脚本与指标对应
+
+- `evaluate_predictions.py` 输出三类 Micro 指标以对应论文定义：
+  - **EAE**：以因果对中的每个论元为单位，角色（reason/result）、事件类型及产品/地区/行业字段全部相同视为命中。
+  - **CET**：只比较因果对的 `reason_type` 与 `result_type` 是否匹配。
+  - **ECE**：完整因果关系同时匹配类型与所有论元字段。
+
 ### 预测
 ```python
 from causality_extraction import CausalExtractionModel, CausalEvent
