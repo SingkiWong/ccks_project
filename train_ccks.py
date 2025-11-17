@@ -44,26 +44,25 @@ class CCKSCausalityDataset(Dataset):
         "产品利润下降": "利润变化", "产品利润增加": "利润变化"
     }
     
-    def __init__(self, data_path: str, split_ratio: float = 0.9):
+    def __init__(self, data_path: str | None = None,
+                 split_ratio: float = 0.9,
+                 samples: List[Dict] | None = None):
         """
         Args:
             data_path: 数据文件路径
             split_ratio: 训练集比例(用于从训练数据中划分验证集)
+            samples: 直接传入的数据列表(跳过文件读取)
         """
+        if samples is not None:
+            self.data = samples
+            self.split_ratio = split_ratio
+            return
+
+        if data_path is None:
+            raise ValueError("data_path 或 samples 必须提供其一")
+
         self.data = self.load_data(data_path)
         self.split_ratio = split_ratio
-        
-        # 如果是训练数据,划分训练集和验证集
-        if 'train' in data_path:
-            split_idx = int(len(self.data) * split_ratio)
-            if split_ratio < 1.0:
-                self.train_data = self.data[:split_idx]
-                self.val_data = self.data[split_idx:]
-                print(f"训练集: {len(self.train_data)} 样本")
-                print(f"验证集: {len(self.val_data)} 样本")
-            else:
-                self.train_data = self.data
-                self.val_data = []
     
     def load_data(self, data_path: str) -> List[Dict]:
         """加载数据"""
@@ -82,6 +81,19 @@ class CCKSCausalityDataset(Dataset):
         
         print(f"从 {data_path} 加载了 {len(data)} 条数据")
         return data
+
+    @staticmethod
+    def split_samples(data: List[Dict], ratios: Tuple[float, float, float] = (0.8, 0.1, 0.1)
+                      ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+        """按比例划分训练/验证/测试集"""
+        if not np.isclose(sum(ratios), 1.0):
+            raise ValueError("ratios 之和必须为1")
+
+        total = len(data)
+        train_end = int(total * ratios[0])
+        val_end = train_end + int(total * ratios[1])
+
+        return data[:train_end], data[train_end:val_end], data[val_end:]
     
     def __len__(self) -> int:
         return len(self.data)
@@ -188,7 +200,7 @@ def train_model(train_loader: DataLoader,
                 val_loader: DataLoader,
                 model: CausalExtractionModel,
                 num_epochs: int = 20,
-                learning_rate: float = 2e-5,
+                learning_rate: float = 3e-5,
                 save_dir: str = './checkpoints'):
     """
     训练模型
@@ -334,33 +346,34 @@ def main():
     """主函数"""
     # 数据路径
     train_path = r'D:\ccks_project\ccks_task2_train.txt'
-    
+
     # 加载数据
     print("加载数据...")
-    dataset = CCKSCausalityDataset(train_path, split_ratio=0.9)
-    
-    # 划分训练集和验证集
-    train_dataset = CCKSCausalityDataset.__new__(CCKSCausalityDataset)
-    train_dataset.data = dataset.train_data
-    
-    val_dataset = CCKSCausalityDataset.__new__(CCKSCausalityDataset)
-    val_dataset.data = dataset.val_data if hasattr(dataset, 'val_data') else []
+    full_dataset = CCKSCausalityDataset(train_path, split_ratio=1.0)
+    train_samples, val_samples, test_samples = CCKSCausalityDataset.split_samples(
+        full_dataset.data, ratios=(0.8, 0.1, 0.1)
+    )
+
+    print(f"训练集: {len(train_samples)} 样本 | 验证集: {len(val_samples)} 样本 | 测试集(留作最终评估): {len(test_samples)} 样本")
+
+    train_dataset = CCKSCausalityDataset(samples=train_samples)
+    val_dataset = CCKSCausalityDataset(samples=val_samples)
     
     # 数据加载器
     train_loader = DataLoader(
         train_dataset,
-        batch_size=4,
+        batch_size=8,
         shuffle=True,
         collate_fn=collate_fn
     )
-    
+
     val_loader = DataLoader(
         val_dataset,
-        batch_size=4,
+        batch_size=8,
         shuffle=False,
         collate_fn=collate_fn
     ) if len(val_dataset.data) > 0 else None
-    
+
     # 初始化模型
     print("\n初始化模型...")
     model = CausalExtractionModel(
@@ -369,17 +382,20 @@ def main():
         num_gnn_layers=3,
         num_heads=4
     )
-    
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"训练设备: {device}")
+
     total_params = sum(p.numel() for p in model.parameters())
     print(f"模型参数量: {total_params:,}")
-    
+
     # 训练
     train_model(
         train_loader=train_loader,
         val_loader=val_loader,
         model=model,
-        num_epochs=10,
-        learning_rate=2e-5,
+        num_epochs=20,
+        learning_rate=3e-5,
         save_dir='./checkpoints'
     )
 

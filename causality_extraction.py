@@ -180,13 +180,85 @@ class HeuristicRules:
     def _check_dependency_path(self, dep_tree: Dict, event_i: CausalEvent,
                               event_j: CausalEvent) -> bool:
         """检查依存路径"""
-        # 简化实现
+        arcs = dep_tree.get('arcs') or dep_tree.get('edges') or dep_tree.get('dependencies')
+        tokens = dep_tree.get('tokens') or dep_tree.get('words') or []
+
+        if not arcs or not tokens:
+            return False
+
+        def _nodes_for_event(event: CausalEvent) -> set:
+            candidates = set()
+            for idx, token in enumerate(tokens):
+                start = token.get('start', token.get('begin', token.get('charBegin')))
+                end = token.get('end', token.get('charEnd'))
+                token_text = token.get('text') or token.get('word', '')
+
+                if start is not None and end is not None:
+                    if event.start_pos <= start < event.end_pos or event.start_pos < end <= event.end_pos:
+                        candidates.add(idx)
+                elif token_text and token_text in event.text:
+                    candidates.add(idx)
+            return candidates
+
+        cause_nodes = _nodes_for_event(event_i)
+        effect_nodes = _nodes_for_event(event_j)
+
+        if not cause_nodes or not effect_nodes:
+            return False
+
+        def _get_arc_fields(arc: Dict):
+            head = arc.get('head', arc.get('from', arc.get('governor', arc.get('source'))))
+            dep = arc.get('dep', arc.get('to', arc.get('dependent', arc.get('target'))))
+            rel = arc.get('rel', arc.get('relation', arc.get('label')))
+            return head, dep, rel
+
+        subject_rels = {'nsubj', 'nsubjpass', 'subj'}
+        object_rels = {'dobj', 'obj', 'pobj', 'attr', 'acomp'}
+
+        for arc in arcs:
+            head, dep, rel = _get_arc_fields(arc)
+            if rel in subject_rels and dep in cause_nodes:
+                for other in arcs:
+                    o_head, o_dep, o_rel = _get_arc_fields(other)
+                    if head == o_head and o_rel in object_rels and o_dep in effect_nodes:
+                        return True
+
+            if rel in subject_rels and dep in effect_nodes:
+                for other in arcs:
+                    o_head, o_dep, o_rel = _get_arc_fields(other)
+                    if head == o_head and o_rel in object_rels and o_dep in cause_nodes:
+                        return True
+
         return False
     
     def _check_causal_role(self, srl_result: Dict, event_i: CausalEvent,
                           event_j: CausalEvent) -> bool:
         """检查语义角色"""
-        # 简化实现
+        if not srl_result:
+            return False
+
+        frames = srl_result.get('frames') or srl_result.get('verbs') or srl_result
+        if not isinstance(frames, list):
+            return False
+
+        def _text_overlap(arg_text: str, event: CausalEvent) -> bool:
+            return bool(arg_text) and (arg_text in event.text or event.text in arg_text)
+
+        for frame in frames:
+            arguments = frame.get('arguments') or frame.get('args') or []
+            predicate_text = frame.get('predicate', '') or frame.get('verb', '')
+
+            for arg in arguments:
+                role = arg.get('role') or arg.get('label', '')
+                arg_text = arg.get('text') or ''.join(arg.get('tokens', []))
+
+                if role in {'AM-CAU', 'ARGM-CAU'} and _text_overlap(arg_text, event_i):
+                    if predicate_text and predicate_text in event_j.text:
+                        return True
+                    if any(_text_overlap(other.get('text') or ''.join(other.get('tokens', [])), event_j)
+                           for other in arguments if other is not arg):
+                        return True
+
         return False
 
 
@@ -519,9 +591,13 @@ class CausalExtractionModel(nn.Module):
     
     def __init__(self, bert_model_name: str = 'bert-base-chinese',
                  hidden_dim: int = 768, num_gnn_layers: int = 3,
-                 num_heads: int = 4):
+                 num_heads: int = 4,
+                 device: torch.device | None = None):
         super(CausalExtractionModel, self).__init__()
-        
+
+        # 设备
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         # BERT编码器
         self.bert = BertModel.from_pretrained(bert_model_name)
         self.tokenizer = BertTokenizer.from_pretrained(bert_model_name)
@@ -547,6 +623,9 @@ class CausalExtractionModel(nn.Module):
             hidden_dim=hidden_dim,
             num_classes=3  # 原因、结果、无关系
         )
+
+        # 将整个模型移至目标设备
+        self.to(self.device)
         
     def encode_events(self, text: str, events: List[CausalEvent]) -> torch.Tensor:
         """
@@ -568,9 +647,9 @@ class CausalExtractionModel(nn.Module):
                 return_tensors='pt',
                 padding=True,
                 truncation=True,
-                max_length=128
-            )
-            
+                max_length=150
+            ).to(self.device)
+
             with torch.no_grad():
                 outputs = self.bert(**tokens)
                 # 使用[CLS] token的表示
@@ -616,11 +695,14 @@ class CausalExtractionModel(nn.Module):
         
         if len(edge_list) == 0:
             # 如果没有边,返回空tensor
-            return torch.empty((2, 0), dtype=torch.long), torch.empty((0, 11))
-        
-        edge_index = torch.tensor(edge_list, dtype=torch.long).t()
-        edge_features = torch.stack(edge_features)
-        
+            return (
+                torch.empty((2, 0), dtype=torch.long, device=self.device),
+                torch.empty((0, 11), device=self.device)
+            )
+
+        edge_index = torch.tensor(edge_list, dtype=torch.long, device=self.device).t()
+        edge_features = torch.stack(edge_features).to(self.device)
+
         return edge_index, edge_features
     
     def forward(self, text: str, events: List[CausalEvent],
@@ -744,6 +826,9 @@ def train_step(model: CausalExtractionModel, text: str,
     # 前向传播
     outputs = model(text, events, event_pairs)
     logits = outputs['logits']
+
+    # 移动标签到模型设备
+    labels = labels.to(model.device)
     
     # 计算focal loss
     loss = model.classifier.compute_focal_loss(logits, labels, alpha, gamma)

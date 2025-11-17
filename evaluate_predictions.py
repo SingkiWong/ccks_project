@@ -19,6 +19,16 @@ class CCKSEvaluator:
         self.total_pred = 0      # 预测的因果关系总数
         self.total_gold = 0      # 真实的因果关系总数
         self.total_correct = 0   # 正确预测的数量
+
+        # 事件论元抽取（EAE）统计：论元角色、类型与跨度都匹配才计为正确
+        self.eae_pred = 0
+        self.eae_gold = 0
+        self.eae_correct = 0
+
+        # 因果事件类型（CET）统计：仅比较因果类型正确性
+        self.cet_pred = 0
+        self.cet_gold = 0
+        self.cet_correct = 0
         
         # 详细统计
         self.stats = {
@@ -43,6 +53,31 @@ class CCKSEvaluator:
             rel.get('result_type', '').strip(),
             rel.get('result_product', '').strip(),
         )
+
+    def normalize_arguments(self, rel: Dict) -> List[Tuple]:
+        """将一个因果关系拆解为论元集合（包含角色信息）。"""
+        reason = (
+            'reason',
+            rel.get('reason_type', '').strip(),
+            rel.get('reason_product', '').strip(),
+            rel.get('reason_region', '').strip(),
+            rel.get('reason_industry', '').strip(),
+        )
+        result = (
+            'result',
+            rel.get('result_type', '').strip(),
+            rel.get('result_product', '').strip(),
+            rel.get('result_region', '').strip(),
+            rel.get('result_industry', '').strip(),
+        )
+        return [reason, result]
+
+    def normalize_cet(self, rel: Dict) -> Tuple:
+        """仅保留因果类型对，用于 Cause-Effect Type (CET) 评价。"""
+        return (
+            rel.get('reason_type', '').strip(),
+            rel.get('result_type', '').strip(),
+        )
     
     def relations_to_set(self, relations: List[Dict]) -> Set[Tuple]:
         """将关系列表转换为集合，便于比较"""
@@ -58,14 +93,34 @@ class CCKSEvaluator:
         """
         pred_set = self.relations_to_set(pred_result)
         gold_set = self.relations_to_set(gold_result)
+
+        # 事件论元集合
+        pred_args = set(arg for rel in pred_result for arg in self.normalize_arguments(rel))
+        gold_args = set(arg for rel in gold_result for arg in self.normalize_arguments(rel))
+
+        # 因果类型集合（忽略论元）
+        pred_cet = set(self.normalize_cet(rel) for rel in pred_result)
+        gold_cet = set(self.normalize_cet(rel) for rel in gold_result)
         
         # 计算交集（正确预测）
         correct_set = pred_set & gold_set
+        correct_args = pred_args & gold_args
+        correct_cet = pred_cet & gold_cet
         
         # 更新统计
         self.total_pred += len(pred_set)
         self.total_gold += len(gold_set)
         self.total_correct += len(correct_set)
+
+        # 论元/EAE统计
+        self.eae_pred += len(pred_args)
+        self.eae_gold += len(gold_args)
+        self.eae_correct += len(correct_args)
+
+        # 因果类型/CET统计
+        self.cet_pred += len(pred_cet)
+        self.cet_gold += len(gold_cet)
+        self.cet_correct += len(correct_cet)
         
         self.stats['total_samples'] += 1
         if pred_result:
@@ -95,18 +150,40 @@ class CCKSEvaluator:
         Returns:
             包含各种指标的字典
         """
-        # 计算 Precision, Recall, F1
+        # ECE：完整因果关系
         precision = self.total_correct / self.total_pred if self.total_pred > 0 else 0
         recall = self.total_correct / self.total_gold if self.total_gold > 0 else 0
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+        # EAE：论元级别
+        eae_precision = self.eae_correct / self.eae_pred if self.eae_pred > 0 else 0
+        eae_recall = self.eae_correct / self.eae_gold if self.eae_gold > 0 else 0
+        eae_f1 = 2 * eae_precision * eae_recall / (eae_precision + eae_recall) if (eae_precision + eae_recall) > 0 else 0
+
+        # CET：因果类型
+        cet_precision = self.cet_correct / self.cet_pred if self.cet_pred > 0 else 0
+        cet_recall = self.cet_correct / self.cet_gold if self.cet_gold > 0 else 0
+        cet_f1 = 2 * cet_precision * cet_recall / (cet_precision + cet_recall) if (cet_precision + cet_recall) > 0 else 0
         
         metrics = {
             'precision': precision,
             'recall': recall,
             'f1': f1,
+            'eae_precision': eae_precision,
+            'eae_recall': eae_recall,
+            'eae_f1': eae_f1,
+            'cet_precision': cet_precision,
+            'cet_recall': cet_recall,
+            'cet_f1': cet_f1,
             'total_pred': self.total_pred,
             'total_gold': self.total_gold,
             'total_correct': self.total_correct,
+            'eae_pred': self.eae_pred,
+            'eae_gold': self.eae_gold,
+            'eae_correct': self.eae_correct,
+            'cet_pred': self.cet_pred,
+            'cet_gold': self.cet_gold,
+            'cet_correct': self.cet_correct,
             'stats': self.stats
         }
         
@@ -124,12 +201,12 @@ class CCKSEvaluator:
         print("\n" + "="*80)
         print("CCKS2021 因果关系抽取评估结果")
         print("="*80)
-        
+
         # 主要指标
-        print(f"\n📊 主要指标:")
-        print(f"  Precision (精确率):  {metrics['precision']:.4f} ({metrics['precision']*100:.2f}%)")
-        print(f"  Recall (召回率):     {metrics['recall']:.4f} ({metrics['recall']*100:.2f}%)")
-        print(f"  F1 Score:           {metrics['f1']:.4f} ({metrics['f1']*100:.2f}%)")
+        print(f"\n📊 主要指标 (Micro):")
+        print(f"  EAE  精确率: {metrics['eae_precision']:.4f}  召回率: {metrics['eae_recall']:.4f}  F1: {metrics['eae_f1']:.4f}")
+        print(f"  CET  精确率: {metrics['cet_precision']:.4f}  召回率: {metrics['cet_recall']:.4f}  F1: {metrics['cet_f1']:.4f}")
+        print(f"  ECE  精确率: {metrics['precision']:.4f}  召回率: {metrics['recall']:.4f}  F1: {metrics['f1']:.4f}")
         
         # 统计信息
         print(f"\n📈 统计信息:")
